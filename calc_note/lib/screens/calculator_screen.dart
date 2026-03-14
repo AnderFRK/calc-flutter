@@ -1,8 +1,12 @@
 import 'package:flutter/material.dart';
 import 'package:math_expressions/math_expressions.dart';
 import 'package:shared_preferences/shared_preferences.dart';
+import 'dart:convert';
 import '../models/calc_row.dart';
 import '../widgets/custom_keypad.dart';
+import '../widgets/calc_bottom_bar.dart';
+import '../widgets/calc_drawer.dart'; 
+import '../utils/file_service.dart'; // Asegúrate de tener este archivo creado
 
 class CalculatorScreen extends StatefulWidget {
   const CalculatorScreen({super.key});
@@ -17,10 +21,13 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
   int _focusedIndex = 0;
   bool _isTextMode = false; 
 
-  // --- VARIABLES PARA EL TÍTULO ---
   String _currentFileName = "Nota Nueva";
-  bool _isEditingTitle = false;
+  String _currentGuideNumber = ""; 
+  
   final TextEditingController _titleController = TextEditingController();
+  final TextEditingController _guideController = TextEditingController();
+
+  List<Map<String, dynamic>> _savedFilesList = [];
 
   @override
   void initState() {
@@ -28,12 +35,15 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     _loadData(); 
   }
 
-  // --- SISTEMA DE GUARDADO ---
+  // --- LÓGICA DE DATOS Y PERSISTENCIA ---
   Future<void> _loadData() async {
     SharedPreferences prefs = await SharedPreferences.getInstance();
     
     _currentFileName = prefs.getString('last_file_name') ?? "Nota Nueva";
+    _currentGuideNumber = prefs.getString('last_guide_number') ?? "";
+    
     _titleController.text = _currentFileName;
+    _guideController.text = _currentGuideNumber;
 
     List<String>? savedText = prefs.getStringList('calc_data_$_currentFileName');
 
@@ -53,42 +63,153 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     for (int i = 0; i < _rows.length; i++) {
       _calculateRow(i, _rows[i].controller.text);
     }
+    _refreshSavedFilesList(); 
   }
 
   Future<void> _saveData() async {
     SharedPreferences prefs = await SharedPreferences.getInstance();
+    
     await prefs.setString('last_file_name', _currentFileName);
+    await prefs.setString('last_guide_number', _currentGuideNumber);
+    
     List<String> dataToSave = _rows.map((row) => row.controller.text).toList();
     await prefs.setStringList('calc_data_$_currentFileName', dataToSave);
+
+    List<String> indexList = prefs.getStringList('files_index') ?? [];
+    
+    Map<String, dynamic> fileInfo = {
+      "title": _currentFileName,
+      "guide": _currentGuideNumber,
+      "total": _grandTotal,
+      "date": DateTime.now().toIso8601String()
+    };
+    
+    String jsonInfo = jsonEncode(fileInfo);
+    
+    indexList.removeWhere((item) => jsonDecode(item)['title'] == _currentFileName);
+    indexList.add(jsonInfo);
+    
+    await prefs.setStringList('files_index', indexList);
+    _refreshSavedFilesList();
+  }
+
+  Future<void> _refreshSavedFilesList() async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+    List<String> indexList = prefs.getStringList('files_index') ?? [];
+    
+    setState(() {
+      _savedFilesList = indexList.map((item) => jsonDecode(item) as Map<String, dynamic>).toList();
+      _savedFilesList.sort((a, b) => b['date'].compareTo(a['date']));
+    });
+  }
+
+  Future<void> _loadSpecificFile(String fileName, String guideNumber) async {
+    SharedPreferences prefs = await SharedPreferences.getInstance();
+    await prefs.setString('last_file_name', fileName);
+    await prefs.setString('last_guide_number', guideNumber);
+    _loadData(); 
+    if (Navigator.canPop(context)) Navigator.pop(context); 
   }
 
   void _crearArchivoNuevo() {
     setState(() {
       _currentFileName = "Nota Nueva";
+      _currentGuideNumber = "";
       _titleController.text = _currentFileName;
+      _guideController.text = "";
       _rows.clear();
       _rows.add(CalcRow());
       _grandTotal = 0.0;
       _focusedIndex = 0;
     });
     _saveData();
-    Navigator.pop(context); 
+    if (Navigator.canPop(context)) Navigator.pop(context); 
   }
 
-  // --- LÓGICA DE TECLADO INTELIGENTE (RESPETA EL CURSOR) ---
+  // --- LÓGICA DE EXPORTACIÓN E IMPORTACIÓN ---
+  void _importarArchivo() async {
+    var note = await FileService.importNote();
+    if (note != null) {
+      setState(() {
+        _currentFileName = note['titulo'] ?? "Importado";
+        _currentGuideNumber = note['guia'] ?? "";
+        _rows.clear();
+        for (String line in note['filas']) {
+          CalcRow row = CalcRow();
+          row.controller.text = line;
+          _rows.add(row);
+        }
+      });
+      for (int i = 0; i < _rows.length; i++) {
+        _calculateRow(i, _rows[i].controller.text);
+      }
+      _saveData(); 
+      if (Navigator.canPop(context)) Navigator.pop(context); 
+      ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Cálculo importado exitosamente')));
+    }
+  }
+
+  void _exportarActual() {
+    List<String> data = _rows.map((r) => r.controller.text).toList();
+    FileService.exportNote(_currentFileName, _currentGuideNumber, data);
+  }
+
+  // --- DIÁLOGO DE EDICIÓN ---
+  void _mostrarDialogoEdicion() {
+    _titleController.text = _currentFileName;
+    _guideController.text = _currentGuideNumber;
+
+    showDialog(
+      context: context,
+      builder: (context) {
+        return AlertDialog(
+          title: const Text("Detalles del Documento"),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            children: [
+              TextField(
+                controller: _titleController,
+                decoration: const InputDecoration(labelText: "Nombre del Archivo"),
+                textCapitalization: TextCapitalization.words,
+              ),
+              const SizedBox(height: 10),
+              TextField(
+                controller: _guideController,
+                decoration: const InputDecoration(labelText: "N° de Guía / Boleta (Opcional)"),
+                keyboardType: TextInputType.text,
+              ),
+            ],
+          ),
+          actions: [
+            TextButton(onPressed: () => Navigator.pop(context), child: const Text("Cancelar")),
+            ElevatedButton(
+              onPressed: () {
+                setState(() {
+                  _currentFileName = _titleController.text.isNotEmpty ? _titleController.text : "Nota Nueva";
+                  _currentGuideNumber = _guideController.text;
+                });
+                _saveData();
+                Navigator.pop(context);
+              },
+              child: const Text("Guardar"),
+            )
+          ],
+        );
+      }
+    );
+  }
+
+  // --- LÓGICA DE MATEMÁTICAS ---
   void _onKeyPressed(String key) {
     if (_rows.isEmpty) return;
     final controller = _rows[_focusedIndex].controller;
-    
-    // Obtenemos en qué posición exacta está la barrita del cursor
     int cursorPos = controller.selection.baseOffset;
-    if (cursorPos < 0) cursorPos = controller.text.length; // Si no hay cursor, asumimos el final
+    if (cursorPos < 0) cursorPos = controller.text.length;
 
     setState(() {
       if (key == 'C') {
         controller.text = '';
       } else if (key == '⌫') {
-        // Borra justo lo que está antes del cursor
         if (controller.text.isNotEmpty && cursorPos > 0) {
           String text = controller.text;
           controller.text = text.substring(0, cursorPos - 1) + text.substring(cursorPos);
@@ -102,7 +223,6 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
           _focusedIndex++;
         }
       } else {
-        // Escribe el número justo donde pusiste el cursor
         String text = controller.text;
         controller.text = text.substring(0, cursorPos) + key + text.substring(cursorPos);
         controller.selection = TextSelection.collapsed(offset: cursorPos + key.length);
@@ -115,7 +235,6 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     if (index == _rows.length - 1 && expression.isNotEmpty) {
       setState(() { _rows.add(CalcRow()); });
     }
-
     if (expression.isEmpty) {
       _rows[index].resultText = '';
       _rows[index].resultValue = 0.0;
@@ -123,17 +242,14 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
       _saveData(); 
       return;
     }
-
     try {
       String cleanExp = expression.replaceAll('x', '*');
       cleanExp = cleanExp.replaceAll(RegExp(r'[^0-9\+\-\*\/\(\)\.]'), '');
       if (cleanExp.isEmpty) throw Exception('Solo texto');
-
       Parser p = Parser();
       Expression exp = p.parse(cleanExp);
       ContextModel cm = ContextModel();
       double eval = exp.evaluate(EvaluationType.REAL, cm);
-      
       setState(() {
         _rows[index].resultValue = eval;
         _rows[index].resultText = eval.toStringAsFixed(2).replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => '${m[1]},');
@@ -154,77 +270,42 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
     setState(() { _grandTotal = total; });
   }
 
+  // --- UI PRINCIPAL ---
   @override
   Widget build(BuildContext context) {
     bool isNativeKeyboardOpen = MediaQuery.of(context).viewInsets.bottom > 0;
 
     return Scaffold(
       backgroundColor: const Color(0xFFF4F8FB),
-      drawer: Drawer(
-        child: ListView(
-          padding: EdgeInsets.zero,
-          children: [
-            const DrawerHeader(
-              decoration: BoxDecoration(color: Color(0xFF3399FF)),
-              child: Text('CalcNote', style: TextStyle(color: Colors.white, fontSize: 24)),
-            ),
-            ListTile(
-              leading: const Icon(Icons.add),
-              title: const Text('Archivo nuevo'),
-              onTap: _crearArchivoNuevo,
-            ),
-            ListTile(
-              leading: const Icon(Icons.save),
-              title: const Text('Guardar (Manual)'),
-              onTap: () {
-                _saveData();
-                Navigator.pop(context);
-                ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Guardado correctamente')));
-              },
-            ),
-            ListTile(
-              leading: const Icon(Icons.folder),
-              title: const Text('Buscar en Archivos'),
-              onTap: () => Navigator.pop(context),
-            ),
-          ],
-        ),
+      drawer: CalcDrawer(
+        savedFilesList: _savedFilesList,
+        onNewFile: _crearArchivoNuevo,
+        onFileLoaded: _loadSpecificFile,
+        onImport: _importarArchivo, 
       ),
       appBar: AppBar(
         iconTheme: const IconThemeData(color: Colors.white), 
-        title: _isEditingTitle 
-          ? TextField(
-              controller: _titleController,
-              autofocus: true, 
-              style: const TextStyle(color: Colors.white, fontSize: 20),
-              cursorColor: Colors.white,
-              decoration: const InputDecoration(border: InputBorder.none),
-              onSubmitted: (val) {
-                setState(() {
-                  _currentFileName = val.isNotEmpty ? val : "Nota Nueva";
-                  _isEditingTitle = false;
-                });
-                _saveData(); 
-              },
-            )
-          : GestureDetector(
-              onTap: () => setState(() => _isEditingTitle = true),
-              child: Row(
+        title: GestureDetector(
+          onTap: _mostrarDialogoEdicion,
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Row(
                 children: [
-                  Text(_currentFileName, style: const TextStyle(color: Colors.white, fontSize: 22)),
-                  const SizedBox(width: 8),
-                  const Icon(Icons.edit, color: Colors.white70, size: 18), 
+                  Text(_currentFileName, style: const TextStyle(color: Colors.white, fontSize: 20, fontWeight: FontWeight.bold)),
+                  const SizedBox(width: 5),
+                  const Icon(Icons.edit, color: Colors.white70, size: 16),
                 ],
               ),
-            ),
+              if (_currentGuideNumber.isNotEmpty)
+                Text("Guía: $_currentGuideNumber", style: const TextStyle(color: Colors.white70, fontSize: 13)),
+            ],
+          ),
+        ),
         backgroundColor: const Color(0xFF3399FF),
         elevation: 0,
         actions: [
-          IconButton(icon: const Icon(Icons.search, color: Colors.white), onPressed: () {
-            ScaffoldMessenger.of(context).showSnackBar(const SnackBar(content: Text('Buscador en desarrollo...')));
-          }),
-          IconButton(icon: const Icon(Icons.add, color: Colors.white), onPressed: _crearArchivoNuevo),
-          IconButton(icon: const Icon(Icons.save, color: Colors.white), onPressed: _saveData),
+          IconButton(icon: const Icon(Icons.share, color: Colors.white), onPressed: _exportarActual),
         ],
       ),
       body: Column(
@@ -261,7 +342,6 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
                             child: Container(
                               padding: const EdgeInsets.symmetric(horizontal: 8),
                               decoration: BoxDecoration(border: Border(right: BorderSide(color: Colors.blue.shade100, width: 1))),
-                              // SOLUCIÓN AL TOQUE: Le ponemos el onTap directo al TextField
                               child: TextField(
                                 controller: _rows[index].controller,
                                 focusNode: _rows[index].focusNode, 
@@ -295,38 +375,19 @@ class _CalculatorScreenState extends State<CalculatorScreen> {
             ),
           ),
           
-          Container(
-            padding: const EdgeInsets.symmetric(horizontal: 8.0, vertical: 4.0),
-            color: const Color(0xFFB3D9FF), 
-            child: Row(
-              children: [
-                TextButton(
-                  onPressed: () {
-                    setState(() { _isTextMode = false; });
-                    FocusScope.of(context).unfocus(); 
-                    if (_rows.isNotEmpty) _rows[_focusedIndex].focusNode.requestFocus();
-                  },
-                  child: Text('123', style: TextStyle(fontSize: 18, color: !_isTextMode ? Colors.blue.shade800 : Colors.blue.shade400)),
-                ),
-                TextButton(
-                  onPressed: () {
-                    setState(() { _isTextMode = true; });
-                    if (_rows.isNotEmpty) _rows[_focusedIndex].focusNode.requestFocus(); 
-                  },
-                  child: Text('ABC', style: TextStyle(fontSize: 18, color: _isTextMode ? Colors.blue.shade800 : Colors.blue.shade400)),
-                ),
-                IconButton(
-                  icon: const Icon(Icons.keyboard_hide, color: Colors.blue),
-                  onPressed: () => FocusScope.of(context).unfocus(),
-                ),
-                const Spacer(),
-                const Text('Total:  ', style: TextStyle(fontSize: 20, color: Colors.black87)),
-                Text(
-                  _grandTotal.toStringAsFixed(2).replaceAllMapped(RegExp(r'(\d{1,3})(?=(\d{3})+(?!\d))'), (Match m) => '${m[1]},'),
-                  style: const TextStyle(fontSize: 20, fontWeight: FontWeight.bold, color: Colors.black87),
-                ),
-              ],
-            ),
+          CalcBottomBar(
+            isTextMode: _isTextMode,
+            grandTotal: _grandTotal,
+            onModeChanged: (isText) {
+              setState(() { _isTextMode = isText; });
+              if (isText) {
+                if (_rows.isNotEmpty) _rows[_focusedIndex].focusNode.requestFocus();
+              } else {
+                FocusScope.of(context).unfocus();
+                if (_rows.isNotEmpty) _rows[_focusedIndex].focusNode.requestFocus();
+              }
+            },
+            onHideKeyboard: () => FocusScope.of(context).unfocus(),
           ),
           
           if (!_isTextMode && !isNativeKeyboardOpen)
