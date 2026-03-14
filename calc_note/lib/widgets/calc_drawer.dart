@@ -32,7 +32,6 @@ class CalcDrawer extends StatelessWidget {
               ],
             ),
           ),
-          // Botones de Acción Rápida
           Padding(
             padding: const EdgeInsets.all(8.0),
             child: Row(
@@ -44,7 +43,6 @@ class CalcDrawer extends StatelessWidget {
             ),
           ),
           const Divider(),
-          // Lista Visual de Notas
           Expanded(
             child: ListView.builder(
               itemCount: savedFilesList.length,

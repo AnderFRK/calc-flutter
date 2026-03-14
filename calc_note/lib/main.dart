@@ -2,6 +2,9 @@ import 'package:flutter/material.dart';
 import 'screens/calculator_screen.dart'; 
 
 void main() {
+  // AGREGA ESTA LÍNEA AQUÍ:
+  WidgetsFlutterBinding.ensureInitialized(); 
+
   runApp(const CalcNoteApp());
 }
 
